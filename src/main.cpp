@@ -1,11 +1,9 @@
 #include <jni.h>
-#include <android/log.h>
 #include <android/input.h>
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
 #include <pthread.h>
 #include <unistd.h>
-#include <dlfcn.h>
 
 #include "pl/Hook.h"
 #include "pl/Gloss.h"
@@ -14,16 +12,9 @@
 #include "ImGui/backends/imgui_impl_opengl3.h"
 #include "ImGui/backends/imgui_impl_android.h"
 
-#include <cstring>
-
-/* ================= GLOBAL ================= */
-
 static bool g_initialized = false;
 static int g_width = 0, g_height = 0;
-
 static EGLBoolean (*orig_eglswapbuffers)(EGLDisplay, EGLSurface) = nullptr;
-
-/* ================= ENCHANT ================= */
 
 static bool enchant_enabled[7];
 
@@ -36,8 +27,6 @@ static const char* enchant_names[7] = {
     "Stone Spear",
     "Wood Spear"
 };
-
-/* ===== BITMAPS ===== */
 
 const unsigned char epd_bitmap_copper_spear[] = {
 0xff,0xf8,0xff,0xe6,0xff,0x9c,0xfe,0x79,0xfe,0xf1,0xff,0x63,0xff,0x43,0xfe,0x07,
@@ -86,110 +75,99 @@ const unsigned char* epd_bitmap_allArray[7] = {
 
 static GLuint enchant_textures[7];
 
-/* ========== BITMAP → TEXTURE ========== */
-
-static GLuint createTexture(const unsigned char* bmp) {
-    unsigned char rgba[16 * 16 * 4];
-    memset(rgba, 0, sizeof(rgba));
-
+static GLuint make_texture(const unsigned char* bmp) {
+    unsigned char rgba[16 * 16 * 4] = {0};
     for (int y = 0; y < 16; y++) {
         for (int x = 0; x < 16; x++) {
-            int byteIndex = (y * 16 + x) / 8;
-            int bit = 7 - (x % 8);
-            bool on = (bmp[byteIndex] >> bit) & 1;
-
-            int i = (y * 16 + x) * 4;
-            if (on) {
+            int bi = (y * 16 + x) / 8;
+            int bt = 7 - (x % 8);
+            if ((bmp[bi] >> bt) & 1) {
+                int i = (y * 16 + x) * 4;
                 rgba[i] = rgba[i+1] = rgba[i+2] = rgba[i+3] = 255;
             }
         }
     }
-
-    GLuint tex;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
+    GLuint t;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    return tex;
+    return t;
 }
-
-/* ========== UI ========== */
 
 static void draw_menu() {
     ImGui::Begin("Enchant", nullptr, ImGuiWindowFlags_NoCollapse);
-
     for (int i = 0; i < 7; i++) {
         ImGui::Image((void*)(intptr_t)enchant_textures[i], ImVec2(24, 24));
         ImGui::SameLine();
         ImGui::Checkbox(enchant_names[i], &enchant_enabled[i]);
     }
-
     ImGui::End();
 }
 
-/* ========== SETUP / RENDER ========== */
-
 static void setup() {
     if (g_initialized) return;
-
     ImGui::CreateContext();
     ImGui_ImplAndroid_Init();
     ImGui_ImplOpenGL3_Init("#version 300 es");
-
     for (int i = 0; i < 7; i++)
-        enchant_textures[i] = createTexture(epd_bitmap_allArray[i]);
-
+        enchant_textures[i] = make_texture(epd_bitmap_allArray[i]);
     g_initialized = true;
 }
 
 static void render() {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplAndroid_NewFrame(g_width, g_height);
     ImGui::NewFrame();
-
     draw_menu();
-
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
-/* ========== EGL HOOK ========== */
-
 static EGLBoolean hook_eglswapbuffers(EGLDisplay dpy, EGLSurface surf) {
-    if (!orig_eglswapbuffers)
-        return EGL_FALSE;
-
     EGLint w, h;
     eglQuerySurface(dpy, surf, EGL_WIDTH, &w);
     eglQuerySurface(dpy, surf, EGL_HEIGHT, &h);
-
     if (w > 500 && h > 500) {
         g_width = w;
         g_height = h;
         setup();
         render();
     }
-
     return orig_eglswapbuffers(dpy, surf);
+}
+
+static int32_t (*orig_input)(void*, void*, bool, long, uint32_t*, AInputEvent**) = 0;
+
+static int32_t hook_input(void* thiz, void* a1, bool a2, long a3, uint32_t* a4, AInputEvent** ev) {
+    int32_t r = orig_input(thiz, a1, a2, a3, a4, ev);
+    if (r == 0 && ev && *ev && g_initialized)
+        ImGui_ImplAndroid_HandleInputEvent(*ev);
+    return r;
 }
 
 static void* mainthread(void*) {
     sleep(3);
-
     GlossInit(true);
-    GHandle hegl = GlossOpen("libEGL.so");
-    if (!hegl) return nullptr;
-
-    void* swap = (void*)GlossSymbol(hegl, "eglSwapBuffers", nullptr);
-    if (!swap) return nullptr;
-
+    GHandle egl = GlossOpen("libEGL.so");
+    void* swap = (void*)GlossSymbol(egl, "eglSwapBuffers", nullptr);
     GlossHook(swap, (void*)hook_eglswapbuffers, (void**)&orig_eglswapbuffers);
+
+    GHandle inp = GlossOpen("libinput.so");
+    void* sym = (void*)GlossSymbol(
+        inp,
+        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",
+        nullptr
+    );
+    GlossHook(sym, (void*)hook_input, (void**)&orig_input);
     return nullptr;
 }
 
 __attribute__((constructor))
 void init() {
     pthread_t t;
-    pthread_create(&t, nullptr, mainthread, nullptr);
+    pthread_create(&t, 0, mainthread, 0);
 }
