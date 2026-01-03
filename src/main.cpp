@@ -101,19 +101,19 @@ static GLuint make_texture(const unsigned char* bmp) {
 }
 
 static void draw_menu() {
-    ImGui::SetNextWindowSize(ImVec2(600, 450), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(900, 650), ImGuiCond_Once);
     ImGui::Begin("Enchant", nullptr, ImGuiWindowFlags_NoCollapse);
     for (int i = 0; i < 7; i++) {
         ImGui::PushID(i);
-        ImGui::Image((void*)(intptr_t)enchant_textures[i], ImVec2(32, 32));
+        ImGui::Image((void*)(intptr_t)enchant_textures[i], ImVec2(48, 48));
         ImGui::SameLine();
         ImGui::Checkbox(enchant_names[i], &enchant_enabled[i]);
         ImGui::SameLine();
-        if (ImGui::Button("+")) enchant_level[i]++;
+        if (ImGui::Button("+", ImVec2(60, 48))) enchant_level[i]++;
         ImGui::SameLine();
         ImGui::Text("Lv %d", enchant_level[i]);
         ImGui::SameLine();
-        if (ImGui::Button("-") && enchant_level[i] > 0) enchant_level[i]--;
+        if (ImGui::Button("-", ImVec2(60, 48)) && enchant_level[i] > 0) enchant_level[i]--;
         ImGui::PopID();
     }
     ImGui::End();
@@ -124,6 +124,9 @@ static void setup() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(g_width, g_height);
+    io.FontGlobalScale = 1.4f;
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.ScaleAllSizes(1.4f);
     ImGui_ImplAndroid_Init();
     ImGui_ImplOpenGL3_Init("#version 300 es");
     for (int i = 0; i < 7; i++)
