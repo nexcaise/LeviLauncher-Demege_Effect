@@ -1,6 +1,3 @@
-// ===============================
-// INCLUDES
-// ===============================
 #include <jni.h>
 #include <android/log.h>
 #include <android/input.h>
@@ -18,88 +15,66 @@
 #include "ImGui/backends/imgui_impl_opengl3.h"
 #include "ImGui/backends/imgui_impl_android.h"
 
-#include <chrono>
-#include <mutex>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <optional>
 #include <array>
 
-// ===============================
+// =====================================================
 // LOG
-// ===============================
-#define LOG_TAG "MoveClient"
+// =====================================================
+#define LOG_TAG "DisplayCPS"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// ===============================
-// IMGUI GLOBALS
-// ===============================
+// =====================================================
+// IMGUI / EGL STATE
+// =====================================================
 static bool g_initialized = false;
 static int g_width = 0, g_height = 0;
 static EGLContext g_targetcontext = EGL_NO_CONTEXT;
 static EGLSurface g_targetsurface = EGL_NO_SURFACE;
 static EGLBoolean (*orig_eglswapbuffers)(EGLDisplay, EGLSurface) = nullptr;
 
-// ===============================
-// MENU STATE
-// ===============================
-static int current_tab = 0;
-
-// ===============================
+// =====================================================
 // CROSSHAIR
-// ===============================
+// =====================================================
 static bool crosshair_enabled = false;
-static float crosshair_length_x = 35.0f;
-static float crosshair_length_y = 35.0f;
-static float crosshair_thickness = 3.0f;
+static float crosshair_length_x = 35.f;
+static float crosshair_length_y = 35.f;
+static float crosshair_thickness = 3.f;
 static ImVec4 crosshair_color = ImVec4(0.f, 1.f, 0.f, 1.f);
 
-// ===============================
+// =====================================================
 // NO HURT CAM
-// ===============================
-static bool g_nohurtcam_enabled = true;
-static bool g_nohurtcam_hooked = false;
+// =====================================================
+static bool nohurtcam_enabled = true;
 
 static std::optional<std::array<float, 3>> (*orig_tryGetDamageBob)(
     void**, void*, float
 ) = nullptr;
 
-// ===============================
-// NO HURT CAM HOOK
-// ===============================
 static std::optional<std::array<float, 3>>
-VanillaCameraAPI_tryGetDamageBob_hook(
-    void** self,
-    void* traits,
-    float a
-) {
-    if (g_nohurtcam_enabled)
+hook_tryGetDamageBob(void** self, void* traits, float a) {
+    if (nohurtcam_enabled)
         return std::nullopt;
-
     return orig_tryGetDamageBob(self, traits, a);
 }
 
-// ===============================
-// MAP PARSER
-// ===============================
-static bool parseMapsLine(const std::string& line, uintptr_t& start, uintptr_t& end) {
-    return sscanf(line.c_str(), "%lx-%lx", &start, &end) == 2;
+// =====================================================
+// NO HURT CAM HOOK
+// =====================================================
+static bool parseMapsLine(const std::string& line, uintptr_t& s, uintptr_t& e) {
+    return sscanf(line.c_str(), "%lx-%lx", &s, &e) == 2;
 }
 
-// ===============================
-// FIND + HOOK NOHURTCAM (ONCE)
-// ===============================
-static bool hookNoHurtCam() {
-    if (g_nohurtcam_hooked) return true;
-
-    void* mc = dlopen("libminecraftpe.so", RTLD_NOLOAD);
-    if (!mc) mc = dlopen("libminecraftpe.so", RTLD_LAZY);
-    if (!mc) return false;
+static void hook_nohurtcam() {
+    void* mc = dlopen("libminecraftpe.so", RTLD_LAZY);
+    if (!mc) return;
 
     constexpr const char* RTTI = "16VanillaCameraAPI";
-    uintptr_t rttiAddr = 0, typeinfo = 0, vtable = 0;
+    uintptr_t rtti = 0, typeinfo = 0, vtable = 0;
 
     std::ifstream maps("/proc/self/maps");
     std::string line;
@@ -108,26 +83,24 @@ static bool hookNoHurtCam() {
         if (line.find("libminecraftpe.so") == std::string::npos) continue;
         uintptr_t s, e;
         if (!parseMapsLine(line, s, e)) continue;
-
         for (uintptr_t p = s; p < e; ++p) {
             if (!memcmp((void*)p, RTTI, strlen(RTTI))) {
-                rttiAddr = p;
+                rtti = p;
                 break;
             }
         }
-        if (rttiAddr) break;
+        if (rtti) break;
     }
     maps.close();
-    if (!rttiAddr) return false;
+    if (!rtti) return;
 
     maps.open("/proc/self/maps");
     while (std::getline(maps, line)) {
         if (line.find("libminecraftpe.so") == std::string::npos) continue;
         uintptr_t s, e;
         if (!parseMapsLine(line, s, e)) continue;
-
         for (uintptr_t p = s; p < e; p += sizeof(void*)) {
-            if (*(uintptr_t*)p == rttiAddr) {
+            if (*(uintptr_t*)p == rtti) {
                 typeinfo = p - sizeof(void*);
                 break;
             }
@@ -135,14 +108,13 @@ static bool hookNoHurtCam() {
         if (typeinfo) break;
     }
     maps.close();
-    if (!typeinfo) return false;
+    if (!typeinfo) return;
 
     maps.open("/proc/self/maps");
     while (std::getline(maps, line)) {
         if (line.find("libminecraftpe.so") == std::string::npos) continue;
         uintptr_t s, e;
         if (!parseMapsLine(line, s, e)) continue;
-
         for (uintptr_t p = s; p < e; p += sizeof(void*)) {
             if (*(uintptr_t*)p == typeinfo) {
                 vtable = p + sizeof(void*);
@@ -152,121 +124,107 @@ static bool hookNoHurtCam() {
         if (vtable) break;
     }
     maps.close();
-    if (!vtable) return false;
+    if (!vtable) return;
 
     void** slot = (void**)(vtable + 2 * sizeof(void*));
     orig_tryGetDamageBob = (decltype(orig_tryGetDamageBob))(*slot);
 
     uintptr_t page = (uintptr_t)slot & ~4095UL;
     mprotect((void*)page, 4096, PROT_READ | PROT_WRITE);
-    *slot = (void*)VanillaCameraAPI_tryGetDamageBob_hook;
+    *slot = (void*)hook_tryGetDamageBob;
     mprotect((void*)page, 4096, PROT_READ);
-
-    g_nohurtcam_hooked = true;
-    LOGI("NoHurtCam hooked");
-    return true;
 }
 
-// ===============================
-// DRAW CROSSHAIR
-// ===============================
-static void draw_crosshair_overlay() {
+// =====================================================
+// DRAW
+// =====================================================
+static void draw_crosshair() {
     if (!crosshair_enabled) return;
     ImDrawList* d = ImGui::GetBackgroundDrawList();
     ImVec2 c(g_width * 0.5f, g_height * 0.5f);
     ImU32 col = ImGui::ColorConvertFloat4ToU32(crosshair_color);
 
-    d->AddLine({c.x - crosshair_length_x, c.y}, {c.x + crosshair_length_x, c.y}, col, crosshair_thickness);
-    d->AddLine({c.x, c.y - crosshair_length_y}, {c.x, c.y + crosshair_length_y}, col, crosshair_thickness);
+    d->AddLine({c.x - crosshair_length_x, c.y},
+               {c.x + crosshair_length_x, c.y}, col, crosshair_thickness);
+    d->AddLine({c.x, c.y - crosshair_length_y},
+               {c.x, c.y + crosshair_length_y}, col, crosshair_thickness);
 }
 
-// ===============================
-// IMGUI TABS
-// ===============================
-static void draw_tab_crosshair() {
+static void draw_menu() {
+    ImGui::Begin("Editor");
+
     ImGui::Checkbox("Enable Crosshair", &crosshair_enabled);
-    ImGui::SliderFloat("Length X", &crosshair_length_x, 5.f, 150.f);
-    ImGui::SliderFloat("Length Y", &crosshair_length_y, 5.f, 150.f);
-    ImGui::SliderFloat("Thickness", &crosshair_thickness, 1.f, 10.f);
+    ImGui::Checkbox("Enable NoHurtCam", &nohurtcam_enabled);
+
+    ImGui::SliderFloat("Length X", &crosshair_length_x, 5, 150);
+    ImGui::SliderFloat("Length Y", &crosshair_length_y, 5, 150);
+    ImGui::SliderFloat("Thickness", &crosshair_thickness, 1, 10);
     ImGui::ColorEdit4("Color", (float*)&crosshair_color);
-}
-
-static void draw_tab_effect() {
-    ImGui::Checkbox("No Hurt Cam", &g_nohurtcam_enabled);
-}
-
-// ===============================
-// MENU
-// ===============================
-static void drawmenu() {
-    ImGui::SetNextWindowSize(ImVec2(600, 500), ImGuiCond_FirstUseEver);
-    ImGui::Begin("MoveClient");
-
-    if (ImGui::Button("Crosshair")) current_tab = 0;
-    ImGui::SameLine();
-    if (ImGui::Button("Effect")) current_tab = 1;
-
-    ImGui::Separator();
-
-    if (current_tab == 0) draw_tab_crosshair();
-    if (current_tab == 1) draw_tab_effect();
 
     ImGui::End();
 }
 
-// ===============================
-// IMGUI RENDER
-// ===============================
-static void render() {
-    if (!g_initialized) return;
-
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplAndroid_NewFrame(g_width, g_height);
-    ImGui::NewFrame();
-
-    drawmenu();
-    draw_crosshair_overlay();
-
-    ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-}
-
-// ===============================
+// =====================================================
 // EGL HOOK
-// ===============================
-static EGLBoolean hook_eglswapbuffers(EGLDisplay dpy, EGLSurface surf) {
-    if (!orig_eglswapbuffers) return EGL_FALSE;
+// =====================================================
+static EGLBoolean hook_eglswapbuffers(EGLDisplay d, EGLSurface s) {
+    if (!orig_eglswapbuffers)
+        return EGL_FALSE;
+
+    EGLContext ctx = eglGetCurrentContext();
+    if (ctx == EGL_NO_CONTEXT)
+        return orig_eglswapbuffers(d, s);
 
     EGLint w, h;
-    eglQuerySurface(dpy, surf, EGL_WIDTH, &w);
-    eglQuerySurface(dpy, surf, EGL_HEIGHT, &h);
-    if (w < 400 || h < 400) return orig_eglswapbuffers(dpy, surf);
+    eglQuerySurface(d, s, EGL_WIDTH, &w);
+    eglQuerySurface(d, s, EGL_HEIGHT, &h);
+
+    if (w < 500 || h < 500)
+        return orig_eglswapbuffers(d, s);
+
+    if (!g_initialized) {
+        g_targetcontext = ctx;
+        g_targetsurface = s;
+
+        ImGui::CreateContext();
+        ImGui_ImplAndroid_Init();
+        ImGui_ImplOpenGL3_Init("#version 300 es");
+        g_initialized = true;
+
+        hook_nohurtcam();
+    }
 
     g_width = w;
     g_height = h;
 
-    if (!g_initialized) {
-        ImGui::CreateContext();
-        ImGui_ImplAndroid_Init();
-        ImGui_ImplOpenGL3_Init("#version 300 es");
-        hookNoHurtCam();
-        g_initialized = true;
-    }
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplAndroid_NewFrame(w, h);
+    ImGui::NewFrame();
 
-    render();
-    return orig_eglswapbuffers(dpy, surf);
+    draw_menu();
+    draw_crosshair();
+
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    return orig_eglswapbuffers(d, s);
 }
 
-// ===============================
+// =====================================================
 // THREAD
-// ===============================
+// =====================================================
 static void* mainthread(void*) {
     sleep(3);
-    GlossInit(true);
 
+    GlossInit(true);
     GHandle egl = GlossOpen("libEGL.so");
-    void* swap = GlossSymbol(egl, "eglSwapBuffers", nullptr);
-    GlossHook(swap, (void*)hook_eglswapbuffers, (void**)&orig_eglswapbuffers);
+    if (!egl) return nullptr;
+
+    void* swap = (void*)GlossSymbol(egl, "eglSwapBuffers", nullptr);
+    if (!swap) return nullptr;
+
+    GlossHook(swap, (void*)hook_eglswapbuffers,
+              (void**)&orig_eglswapbuffers);
     return nullptr;
 }
 
